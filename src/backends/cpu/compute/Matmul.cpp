@@ -70,15 +70,21 @@ ErrorCode mat_mul(Tensor *src0, Tensor *src1, Tensor *dst, bool support_bias, Te
     }
 #endif
     auto not_vec_dot_type = src0_dtype != vec_dot_type;
-    std::unique_ptr<Tensor> to; // later this tensor will be freed by ~Tensor
+    Tensor to{};
+    struct Finally{
+        Tensor & tensor ; 
+        ~Finally() { tensor.free() ; }
+    }on_exit{to};
+
     if (not_vec_dot_type) {
         // convert x.dtype to vec_dot_type
         // so that we can use vec_dot to calculate dot product
         assert(src0_dtype == MLLM_TYPE_F32); // x should be fp32
-        to = std::make_unique<Tensor>(src0->shape());
-        to->setBackend(src0->backend());
-        to->setDtype(vec_dot_type);
-        to->alloc();
+        to = Tensor(src0->shape());
+
+        to.setBackend(src0->backend());
+        to.setDtype(vec_dot_type);
+        to.alloc();
         int64_t i_processed = 0;
         if ((from_float_to_mat != nullptr) && (gemv != nullptr) && dst->masterTensor() == nullptr) {
             for (int b = 0; b < src0->batch(); b++) {
@@ -86,9 +92,9 @@ ErrorCode mat_mul(Tensor *src0, Tensor *src1, Tensor *dst, bool support_bias, Te
 #pragma omp parallel for collapse(1) num_threads(thread_count)
                     for (int64_t s = 0; s < src0->sequence() - src0->sequence() % 4; s += 4) {
                         from_float_to_mat(src0->hostPtr<float>() + src0->offset(b, h, s, 0),
-                                          (char *)to->rawHostPtr()
-                                              + to->offset(b, h, s, 0) * type_size(to->dtype())
-                                                    / blck_size(to->dtype()),
+                                          (char *)to.rawHostPtr()
+                                              + to.offset(b, h, s, 0) * type_size(to.dtype())
+                                                    / blck_size(to.dtype()),
                                           4, src0->dimension(), blck_size_interleave);
                     }
                     i_processed = src0->sequence() - src0->sequence() % 4;
@@ -100,14 +106,14 @@ ErrorCode mat_mul(Tensor *src0, Tensor *src1, Tensor *dst, bool support_bias, Te
             for (int h = 0; h < src0->head(); h++) {
                 for (int s = i_processed; s < src0->sequence(); s++) {
                     x_to_vec_dot_type(src0->hostPtr<float>() + src0->offset(b, h, s, 0),
-                                      (char *)to->rawHostPtr()
-                                          + to->offset(b, h, s, 0) * type_size(to->dtype())
-                                                / blck_size(to->dtype()),
+                                      (char *)to.rawHostPtr()
+                                          + to.offset(b, h, s, 0) * type_size(to.dtype())
+                                                / blck_size(to.dtype()),
                                       src0->dimension());
                 }
             }
         }
-        src0 = to.get();
+        src0 = &to;
         src0_dtype = src0->dtype();
         src0_type_size = type_size(src0->dtype());
         src0_blck_size = blck_size(src0->dtype());
